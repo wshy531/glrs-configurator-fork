@@ -58,6 +58,7 @@ const state = {
   driftStatus: null,
   flappingStatus: null,
   driftDetailed: false,
+  driftDebug: false,
   flappingDebug: false,
   configResponse: null,
   hardware: null,
@@ -900,11 +901,11 @@ async function checkConnectionHealth() {
   if (state.connectionStatus !== 'connected' || state.busy || connectionHealthInFlight) return;
   connectionHealthInFlight = true;
   try {
-    if ((Object.hasOwn(config(), 'fc_drift') && ['status', 'flight'].includes(state.tab)) || (state.tab === 'flight' && state.flappingDebug && Object.hasOwn(config(), 'fc_flapping'))) {
+    if (state.tab === 'flight' && ((state.driftDebug && Object.hasOwn(config(), 'fc_drift')) || (state.flappingDebug && Object.hasOwn(config(), 'fc_flapping')))) {
       const status = await apiFetch('/status.json', {timeout: CONNECTION_HEALTH_TIMEOUT_MS, cache: 'no-store'});
       state.driftStatus = status?.drift ?? null;
       state.flappingStatus = status?.flapping ?? null;
-      document.querySelectorAll('[data-drift-status]').forEach((node) => { node.innerHTML = driftStatusHtml(); });
+      if (state.driftDebug) document.querySelectorAll('[data-drift-status]').forEach((node) => { node.innerHTML = driftStatusHtml(); });
       if (state.flappingDebug) document.querySelectorAll('[data-flapping-status]').forEach((node) => { node.innerHTML = flappingStatusHtml(); });
     } else await apiFetch('/target', {timeout: CONNECTION_HEALTH_TIMEOUT_MS, cache: 'no-store'});
     connectionHealthFailures = 0;
@@ -3525,7 +3526,6 @@ function renderStatus() {
   const h = hardware();
   return `<div class="debug-page">
     <div class="grid status-summary-grid">
-      ${Object.hasOwn(config(), 'fc_drift') ? `<section class="panel"><h2>${t('drift.heading')}</h2><div data-drift-status>${driftStatusHtml()}</div></section>` : ''}
       <section class="panel">
         <h2>${t('status.device')}</h2>
         <div class="metric"><span>${t('status.target')}</span><strong>${escapeHtml(state.target?.target || c.target || t('value.unknown'))}</strong></div>
@@ -4149,17 +4149,19 @@ function renderDriftCard() {
   const detailed = !beginner && state.driftDetailed === true;
   return `<details class="flight-setting-card drift-card">
     <summary>${t('drift.heading')}</summary><div class="flight-setting-card-body">
-    <p class="helper">${t(beginner ? 'drift.beginnerHelp' : 'drift.help')}</p>
+    <p class="helper">${t('drift.help')}</p>
     ${beginner ? '' : `<div class="check"><input type="checkbox" id="drift-detailed" data-drift-detailed ${detailed ? 'checked' : ''}><label for="drift-detailed">${t('drift.detailedParameters')}</label></div>`}
     <div class="drift-beginner-settings" data-drift-simple ${detailed ? 'hidden' : ''}>
     <div class="beginner-sensitivity-field"><label class="beginner-sensitivity-control" for="drift-sensitivity"><span class="beginner-sensitivity-label"><strong>${t('drift.strength')}</strong><output data-drift-strength-output></output></span><input type="range" id="drift-sensitivity" min="1" max="10" step="1" value="${Math.max(1, Math.round(d.max_reduction_percent / 3))}"></label><small class="helper">${t('drift.strengthHelp')}</small></div>
-    <p class="helper" data-drift-trigger></p><p class="helper">${t('drift.advancedPreserved')}</p>
+    <p class="helper" data-drift-trigger></p>
     </div>
     <div class="filter-lpf-grid" data-drift-details ${detailed ? '' : 'hidden'}>
     ${DRIFT_FIELDS.map(([key,min,max,unit]) => {
       return `<div class="row"><label for="fc_drift_${key}">${t(`drift.${key}`)} (${unit})</label><input type="${detailed ? 'number' : 'hidden'}" id="fc_drift_${key}" name="fc_drift_${key}" min="${min}" max="${max}" step="${key.endsWith('_ms') ? 1 : 'any'}" value="${escapeHtml(d[key])}" ${detailed ? 'required' : ''}><small class="helper">${t(`drift.hint.${key}`)}</small></div>`;
     }).join('')}
-    </div><div data-drift-status>${driftStatusHtml()}</div>
+    </div>
+    <div class="check"><input type="checkbox" id="drift-debug" data-drift-debug aria-controls="drift-debug-info" ${checked(state.driftDebug)}><label for="drift-debug">${t('drift.showDebug')}</label></div>
+    <div id="drift-debug-info" data-drift-status ${state.driftDebug ? '' : 'hidden'}>${state.driftDebug ? driftStatusHtml() : ''}</div>
     <div class="actions"><button type="button" class="secondary" data-action="drift-reset">${t('drift.reset')}</button></div>
     </div></details>`;
 }
@@ -4189,7 +4191,7 @@ function syncDriftBeginnerSummary() {
   const start = Number(form.elements.fc_drift_start.value);
   const end = Number(form.elements.fc_drift_end.value);
   form.querySelector('[data-drift-trigger]').textContent = t(
-    start === 1700 && end === 2100 ? 'drift.triggerHigh' : 'drift.triggerCustom',
+    form.elements.fc_drift_enabled.checked ? 'drift.triggerRange' : 'drift.triggerDisabled',
     {channel: form.elements.fc_drift_channel.value, start, end});
 }
 
@@ -5196,6 +5198,13 @@ function render() {
 
 function wireEvents() {
   syncDriftBeginnerSummary();
+  document.querySelector('[data-drift-debug]')?.addEventListener('change', (event) => {
+    state.driftDebug = event.target.checked;
+    const debug = document.querySelector('[data-drift-status]');
+    debug.hidden = !state.driftDebug;
+    debug.innerHTML = state.driftDebug ? driftStatusHtml() : '';
+    if (state.driftDebug) void checkConnectionHealth();
+  });
   document.querySelector('[data-flapping-debug]')?.addEventListener('change', (event) => {
     state.flappingDebug = event.target.checked;
     const debug = document.querySelector('[data-flapping-status]');
@@ -5212,6 +5221,7 @@ function wireEvents() {
     syncDriftBeginnerSummary();
   });
   document.querySelector('[name="fc_drift_channel"]')?.addEventListener('change', syncDriftBeginnerSummary);
+  document.querySelector('[name="fc_drift_enabled"]')?.addEventListener('change', syncDriftBeginnerSummary);
   document.querySelector('[data-expert-mode]')?.addEventListener('change', (event) => {
     state.beginnerMode = !event.target.checked;
     persistMode();
