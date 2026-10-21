@@ -2394,3 +2394,7 @@ details.flight-setting-card > summary {
   .beginner-sensitivity-grid { grid-template-columns: 1fr; }
   .flight-setting-card-body { overflow-x: auto; padding: 12px; }
 }
+
+#flapping-settings .grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr)); }
+#flapping-settings fieldset { border: 1px solid #d8dee6; border-radius: 6px; margin: 12px 0; min-width: 0; padding: 12px; }
+#flapping-settings legend { color: #465160; font-size: 13px; }

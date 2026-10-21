@@ -1,5 +1,6 @@
 import './styles.css';
 import {DRIFT_DEFAULTS, DRIFT_FIELDS, validateDrift} from './drift.js';
+import {FLAPPING_DEFAULTS, validateFlapping, flappingPayload} from './flapping.js';
 import * as THREE from 'three';
 import {GLTFLoader} from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { t, setLocale, getLocale } from './i18n.js';
@@ -55,7 +56,9 @@ const state = {
   tab: 'status',
   target: null,
   driftStatus: null,
+  flappingStatus: null,
   driftDetailed: false,
+  flappingDebug: false,
   configResponse: null,
   hardware: null,
   bindingPhrase: '',
@@ -313,7 +316,9 @@ function apiUrl(path) {
 
 async function apiFetch(path, options = {}) {
   if (path === '/config' && options.method === 'POST' && options.body) {
-    const payload = JSON.parse(options.body);
+    let payload = JSON.parse(options.body);
+    try { payload = flappingPayload(payload, config()); }
+    catch (error) { throw new Error(t(`flapping.error.${error.message}`)); }
     if (!Object.hasOwn(config(), 'fc_drift')) delete payload.fc_drift;
     options = {...options, body: JSON.stringify(payload)};
   }
@@ -336,6 +341,21 @@ async function apiFetch(path, options = {}) {
   const body = contentType.includes('application/json') ? await response.json() : await response.text();
   if (!response.ok) {
     const detail = typeof body === 'string' ? body : JSON.stringify(body);
+    if (path === '/config') {
+      const flappingErrors = {
+        'Invalid flapping parameters': 'parameters',
+        'Invalid flapping ARM configuration': 'arm',
+        'Flapping requires an arm switch': 'arm',
+        'Flapping and drift assistance are mutually exclusive': 'exclusive',
+        'Flapping input channel conflicts with ARM or Wi-Fi': 'channel',
+        'Flapping requires two standard PWM servo outputs': 'output',
+        'Flapping positions exceed PWM output limits': 'limits',
+        'Flapping frequency needs at least four PWM frames per half-stroke': 'frequency',
+        'Wait for valid RC state before changing flapping': 'rc_state',
+        'Lower throttle to zero and wait for wings to park before changing flapping': 'park_first',
+      };
+      if (flappingErrors[detail.trim()]) throw new Error(t(`flapping.error.${flappingErrors[detail.trim()]}`));
+    }
     if (path === '/config' && response.status === 409) {
       const driftErrors = {
         'Disarm before changing drift assistance': 'disarm',
@@ -774,8 +794,10 @@ async function loadDevice() {
   state.connectionStatus = 'connected';
   connectionHealthFailures = 0;
   state.configResponse = configResponse;
-  state.driftStatus = Object.hasOwn(config(), 'fc_drift')
-    ? (await apiFetch('/status.json', {timeout: 2000}).catch(() => null))?.drift ?? null : null;
+  const runtimeStatus = Object.hasOwn(config(), 'fc_drift') || Object.hasOwn(config(), 'fc_flapping')
+    ? await apiFetch('/status.json', {timeout: 2000}).catch(() => null) : null;
+  state.driftStatus = runtimeStatus?.drift ?? null;
+  state.flappingStatus = runtimeStatus?.flapping ?? null;
   state.hardware = hardwareResponse;
   state.imuCalibration = {
     busy: '',
@@ -878,10 +900,12 @@ async function checkConnectionHealth() {
   if (state.connectionStatus !== 'connected' || state.busy || connectionHealthInFlight) return;
   connectionHealthInFlight = true;
   try {
-    if (Object.hasOwn(config(), 'fc_drift') && ['status', 'flight'].includes(state.tab)) {
+    if ((Object.hasOwn(config(), 'fc_drift') && ['status', 'flight'].includes(state.tab)) || (state.tab === 'flight' && state.flappingDebug && Object.hasOwn(config(), 'fc_flapping'))) {
       const status = await apiFetch('/status.json', {timeout: CONNECTION_HEALTH_TIMEOUT_MS, cache: 'no-store'});
       state.driftStatus = status?.drift ?? null;
+      state.flappingStatus = status?.flapping ?? null;
       document.querySelectorAll('[data-drift-status]').forEach((node) => { node.innerHTML = driftStatusHtml(); });
+      if (state.flappingDebug) document.querySelectorAll('[data-flapping-status]').forEach((node) => { node.innerHTML = flappingStatusHtml(); });
     } else await apiFetch('/target', {timeout: CONNECTION_HEALTH_TIMEOUT_MS, cache: 'no-store'});
     connectionHealthFailures = 0;
   } catch {
@@ -889,6 +913,7 @@ async function checkConnectionHealth() {
     if (connectionHealthFailures >= CONNECTION_HEALTH_FAILURE_LIMIT && state.connectionStatus === 'connected') {
       state.connectionStatus = 'idle';
       state.driftStatus = null;
+      state.flappingStatus = null;
       state.target = null;
       state.configResponse = null;
       state.hardware = null;
@@ -1053,6 +1078,27 @@ async function saveBeginnerPwm() {
   }, t('message.pwmSaved'));
 }
 
+function restoreFlightForm(previous) {
+  const current = document.querySelector('#flight-form');
+  if (!current || !previous) return;
+  for (const input of previous.elements) {
+    const target = input.name ? current.elements.namedItem(input.name)
+      : input.dataset.grid ? current.querySelector(`[data-grid="${input.dataset.grid}"][data-row="${input.dataset.row}"][data-col="${input.dataset.col}"]`)
+      : null;
+    if (!target || !('value' in target)) continue;
+    target.value = input.value;
+    if (input.type === 'checkbox' || input.type === 'radio') target.checked = input.checked;
+    target.disabled = input.disabled;
+  }
+  current.querySelectorAll('[data-mode-enabled], #fc_arm_enabled').forEach((input) => {
+    input.dispatchEvent(new Event('change'));
+  });
+  const details = current.querySelectorAll('details');
+  previous.querySelectorAll('details').forEach((element, index) => {
+    if (details[index]) details[index].open = element.open;
+  });
+}
+
 async function saveFlight(event) {
   event.preventDefault();
   if (!state.target) return;
@@ -1060,13 +1106,13 @@ async function saveFlight(event) {
     setMessage('error', state.profileImportError);
     return;
   }
-  if (state.beginnerMode) {
-    await saveBeginnerFlightOrientation(event.currentTarget);
-    return;
-  }
   const form = event.currentTarget;
-  const nextConfig = {...config()};
-  await runBusy(async () => {
+  try {
+    if (state.beginnerMode) {
+      await saveBeginnerFlightOrientation(form);
+      return;
+    }
+    const nextConfig = {...config()};
     nextConfig.fc_mode_conditions = {};
     ['rate', 'angle'].forEach((mode) => {
       if (!form[`fc_${mode}_enabled`].checked) return;
@@ -1136,16 +1182,24 @@ async function saveFlight(event) {
     if (nextConfig.fc_accel_scale.some((value) => value <= 0.5 || value >= 1.5)) {
       throw new Error(t('error.accelScaleRange'));
     }
+    if (Object.hasOwn(config(), 'fc_flapping'))
+      nextConfig.fc_flapping = validatedFlapping(readFlappingForm(form), nextConfig);
     delete nextConfig.pwm;
-    await apiFetch('/config', {method: 'POST', body: JSON.stringify(nextConfig)});
-    if (state.profileDraft) {
-      state.profileDraft.flight = null;
-      if (!state.profileDraft.pwm) state.profileDraft = null;
-    }
-    markProfileSectionApplied('flight');
-    state.extraMixerRows = 0;
-    await loadDevice();
-  }, t('message.flightSaved'));
+    await runBusy(async () => {
+      await apiFetch('/config', {method: 'POST', body: JSON.stringify(nextConfig)});
+      if (state.profileDraft) {
+        state.profileDraft.flight = null;
+        if (!state.profileDraft.pwm) state.profileDraft = null;
+      }
+      markProfileSectionApplied('flight');
+      state.extraMixerRows = 0;
+      await loadDevice();
+    }, t('message.flightSaved'));
+    if (state.message?.type === 'error') restoreFlightForm(form);
+  } catch (error) {
+    setMessage('error', error.message || String(error));
+    restoreFlightForm(form);
+  }
 }
 
 function beginnerSensitivityLevel(value, baseValue = BEGINNER_RATE_PID_BASE[0]) {
@@ -1287,17 +1341,30 @@ async function saveBeginnerFlightOrientation(form) {
     fc_rate_pid: readBeginnerRatePid(form),
     fc_rate_ff: readBeginnerRateFeedforward(form),
   };
+  if (form.elements.fc_arm_enabled) {
+    nextConfig.fc_arm_enabled = form.elements.fc_arm_enabled.checked;
+    nextConfig.fc_arm_channel = Number(form.elements.fc_arm_channel.value);
+    nextConfig.fc_arm_range = [Number(form.elements.fc_arm_start.value), Number(form.elements.fc_arm_end.value)];
+    if (nextConfig.fc_arm_range[0] < 900 || nextConfig.fc_arm_range[1] > 2100 || nextConfig.fc_arm_range[0] >= nextConfig.fc_arm_range[1])
+      throw new Error(`${t('message.invalidRange')}: ARM`);
+  }
+  if (Object.hasOwn(config(), 'fc_drift')) nextConfig.fc_drift = readDriftForm(form, nextConfig);
+  if (Object.hasOwn(config(), 'fc_flapping')) nextConfig.fc_flapping = validatedFlapping(readFlappingForm(form), nextConfig);
   // The configuration read endpoint exposes PWM entries as objects with
   // metadata, while the write endpoint expects an array of raw integers.
   // Beginner mode does not edit PWM, so leave it out and preserve it on the
   // receiver instead of sending the read-only object representation back.
   delete nextConfig.pwm;
   await runBusy(async () => {
-    if (Object.hasOwn(config(), 'fc_drift')) nextConfig.fc_drift = readDriftForm(form, nextConfig);
     await apiFetch('/config', {method: 'POST', body: JSON.stringify(nextConfig)});
+    if (state.profileDraft) {
+      state.profileDraft.flight = null;
+      if (!state.profileDraft.pwm) state.profileDraft = null;
+    }
     markProfileSectionApplied('flight');
     await loadDevice();
   }, t('message.flightSaved'));
+  if (state.message?.type === 'error') restoreFlightForm(form);
 }
 
 function sleep(ms) {
@@ -2266,15 +2333,22 @@ function profilePwmOutputs() {
 
 function profileFlightConfig() {
   const form = document.querySelector('#flight-form');
+  const flapping = readFlappingForm();
+  const formArm = form?.elements.fc_arm_enabled ? {
+    enabled: form.elements.fc_arm_enabled.checked,
+    channel: Number(form.elements.fc_arm_channel.value),
+    range: [Number(form.elements.fc_arm_start.value), Number(form.elements.fc_arm_end.value)],
+  } : null;
   if (!form || state.beginnerMode) {
     return {
       modeConditions: flightConfigValue('fc_mode_conditions', {}),
-      arm: {
+      arm: formArm ?? {
         enabled: flightConfigValue('fc_arm_enabled', false),
         channel: flightConfigValue('fc_arm_channel', 5),
         range: flightConfigValue('fc_arm_range', [1700, 2100]),
       },
       drift: form && Object.hasOwn(config(), 'fc_drift') ? readDriftForm(form) : flightConfigValue('fc_drift', DRIFT_DEFAULTS),
+      flapping,
       ratePid: flightConfigValue('fc_rate_pid', []),
       rateFeedforward: flightConfigValue('fc_rate_ff', [0, 0, 0]),
       anglePid: flightConfigValue('fc_angle_pid', []),
@@ -2300,7 +2374,7 @@ function profileFlightConfig() {
   });
   return {
     modeConditions,
-    arm: {
+    arm: formArm ?? {
       enabled: form.fc_arm_enabled.checked,
       channel: intOrDefault(form.fc_arm_channel.value, 5),
       range: [
@@ -2309,6 +2383,7 @@ function profileFlightConfig() {
       ],
     },
     drift: Object.hasOwn(config(), 'fc_drift') ? readDriftForm(form) : flightConfigValue('fc_drift', DRIFT_DEFAULTS),
+    flapping,
     ratePid: readNumGrid(form, 'fc_rate_pid', 3, 4),
     rateFeedforward: readNumGrid(form, 'fc_rate_ff', 3, 1),
     anglePid: readNumGrid(form, 'fc_angle_pid', 3, 4),
@@ -2570,8 +2645,12 @@ function validateProfile(profile, {deviceAware = Boolean(state.configResponse)} 
       fc_mixer_servos: Array.from({length: mixerOutputCount}, (_, index) => Boolean(mixerServos[index])),
       fc_orientation: orientation,
       fc_drift: validatedDrift(profile.flight.drift),
+      fc_flapping: validatedFlapping(profile.flight.flapping),
     };
     draft.flight.fc_drift = validatedDrift(draft.flight.fc_drift, draft.flight);
+    draft.flight.fc_flapping = validatedFlapping(draft.flight.fc_flapping, {...config(), ...draft.flight,
+      pwm: draft.pwm ?? config().pwm, fc_pwm_output_limits: draft.pwmLimits ?? config().fc_pwm_output_limits});
+    if (deviceAware && draft.flight.fc_flapping.enabled && !Object.hasOwn(config(), 'fc_flapping')) throw new Error(t('flapping.error.unsupported'));
   }
   return {draft, warnings};
 }
@@ -3560,6 +3639,7 @@ function renderPwm() {
       <div class="helper pwm-help">
         ${t('pwm.help.general')}
       </div>
+      ${flightConfigValue('fc_flapping', FLAPPING_DEFAULTS).enabled ? `<div class="notice">${t('flapping.owned', {left: flightConfigValue('fc_flapping', FLAPPING_DEFAULTS).left.output, right: flightConfigValue('fc_flapping', FLAPPING_DEFAULTS).right.output})}</div>` : ''}
       <form id="pwm-form">
         <div class="table-shell">
           <table class="grid-table pwm-table">
@@ -3943,6 +4023,83 @@ function renderOrientationCalibration(installEuler) {
     </div>`;
 }
 
+function validatedFlapping(value, context) {
+  try { return validateFlapping(value, context); }
+  catch (error) { throw new Error(t(`flapping.error.${error.message}`)); }
+}
+
+function readFlappingForm(form = document.querySelector('#flight-form')) {
+  if (!form?.elements.flapping_enabled) return validatedFlapping(flightConfigValue('fc_flapping', FLAPPING_DEFAULTS));
+  const n = (key) => Number(form.elements[`flapping_${key}`].value);
+  const value = {
+    enabled: form.elements.flapping_enabled.checked,
+    throttle_channel: n('throttle_channel'), steering_channel: n('steering_channel'),
+    min_hz: n('min_hz'), max_hz: n('max_hz'), downstroke_percent: n('downstroke_percent'),
+    differential_percent: n('differential_percent'), reverse_steering: form.elements.flapping_reverse_steering.checked,
+  };
+  for (const side of ['left', 'right']) value[side] = Object.fromEntries(
+    ['output', 'up_us', 'down_us', 'park_us'].map((key) => [key, n(`${side}_${key}`)]));
+  return validatedFlapping(value);
+}
+
+function flappingStatusHtml() {
+  if (state.connectionStatus !== 'connected') return '';
+  const f = state.flappingStatus;
+  if (!f) return `<p class="helper">${t('flapping.statusUnavailable')}</p>`;
+  const number = (value, digits = 0) => Number.isFinite(value) ? value.toFixed(digits) : '—';
+  const configurationErrors = {
+    'Invalid flapping parameters': 'parameters',
+    'Flapping requires an arm switch': 'arm',
+    'Flapping and drift assistance are mutually exclusive': 'exclusive',
+    'Flapping input channel conflicts with ARM or Wi-Fi': 'channel',
+    'Flapping requires two standard PWM servo outputs': 'output',
+    'Flapping positions exceed PWM output limits': 'limits',
+    'Flapping frequency needs at least four PWM frames per half-stroke': 'frequency',
+  };
+  const error = configurationErrors[f.configuration_error];
+  return `<div class="metric"><span>${t('flapping.state')}</span><strong>${escapeHtml(t(`flapping.reason.${f.reason || 'waiting'}`))}</strong></div>
+    ${error ? `<p class="helper">${escapeHtml(t(`flapping.error.${error}`))}</p>` : ''}
+    <div class="metric"><span>${t('flapping.receivedInputs')}</span><strong>CH${number(f.throttle_channel)}: ${number(f.throttle_us)} / CH${number(f.arm_channel)}: ${number(f.arm_us)} μs</strong></div>
+    <div class="metric"><span>${t('flapping.outputCommands')}</span><strong>${number(f.left_us)} / ${number(f.right_us)} μs · ${number(f.frequency_hz, 2)} Hz</strong></div>
+    ${f.reason === 'waiting_zero' ? `<p class="helper">${t('flapping.zeroHelp')}</p>` : ''}`;
+}
+
+function renderFlappingCard() {
+  if (state.connectionStatus === 'connected' && !Object.hasOwn(config(), 'fc_flapping'))
+    return `<details class="flight-setting-card"><summary>${t('flapping.heading')}</summary><div class="flight-setting-card-body helper">${t('flapping.error.unsupported')}</div></details>`;
+  const f = flightConfigValue('fc_flapping', FLAPPING_DEFAULTS);
+  const channelOptions = (value, first = 1) => Array.from({length: 17 - first}, (_, i) => i + first)
+    .map((ch) => `<option value="${ch}" ${selected(ch, value)}>CH${ch}</option>`).join('');
+  const selectChannel = (key, value, first = 1) => `<div class="row"><label for="flapping_${key}">${t(`flapping.${key}`)}</label><select id="flapping_${key}" name="flapping_${key}">${channelOptions(value, first)}</select></div>`;
+  const number = (key, value, min, max, step = 1) => `<div class="row"><label for="flapping_${key}">${t(`flapping.${key}`)}</label><input id="flapping_${key}" name="flapping_${key}" type="number" min="${min}" max="${max}" step="${step}" value="${escapeHtml(value)}" required></div>`;
+  const armRange = flightConfigValue('fc_arm_range', [1700, 2100]);
+  const count = pwmEntries().length || 16;
+  const wing = (side) => `<fieldset><legend>${t(`flapping.${side}`)}</legend>
+    <div class="row"><label for="flapping_${side}_output">${t('flapping.output')}</label><select id="flapping_${side}_output" name="flapping_${side}_output">${Array.from({length: count}, (_, i) => `<option value="${i + 1}" ${selected(f[side].output, i + 1)}>PWM ${i + 1}</option>`).join('')}</select></div>
+    ${['up_us', 'down_us', 'park_us'].map((key) => `<div class="row"><label for="flapping_${side}_${key}">${t(`flapping.${key}`)} (μs)</label><input id="flapping_${side}_${key}" name="flapping_${side}_${key}" type="number" min="500" max="2500" step="1" value="${escapeHtml(f[side][key])}" required></div>`).join('')}
+    </fieldset>`;
+  return `<details class="flight-setting-card"><summary>${t('flapping.heading')}</summary><div class="flight-setting-card-body">
+    <div id="flapping-settings">
+      <p class="helper">${t('flapping.help')}</p>
+      <label class="checkbox"><input name="flapping_enabled" type="checkbox" ${checked(f.enabled)}> ${t('flapping.enabled')}</label>
+      <div class="grid">${selectChannel('throttle_channel', f.throttle_channel)}${selectChannel('steering_channel', f.steering_channel)}
+      ${number('min_hz', f.min_hz, 0.1, 10, 'any')}${number('max_hz', f.max_hz, 0.1, 10, 'any')}
+      ${number('downstroke_percent', f.downstroke_percent, 20, 50, 1)}${number('differential_percent', f.differential_percent, 0, 50, 1)}</div>
+      <label class="checkbox"><input name="flapping_reverse_steering" type="checkbox" ${checked(f.reverse_steering)}> ${t('flapping.reverse_steering')}</label>
+      <p class="helper">${t('flapping.positionsHelp')}</p>
+      <div class="grid">${wing('left')}${wing('right')}</div>
+      ${state.beginnerMode ? `<fieldset><legend>${t('flapping.armHelp')}</legend>
+        <label class="checkbox"><input name="fc_arm_enabled" type="checkbox" ${checked(flightConfigValue('fc_arm_enabled', false))}> ${t('flapping.arm_enabled')}</label>
+        <div class="row"><label for="fc-arm-channel">${t('flapping.arm_channel')}</label><select id="fc-arm-channel" name="fc_arm_channel">${channelOptions(flightConfigValue('fc_arm_channel', 5), 5)}</select></div>
+        <div class="grid">${['start', 'end'].map((edge, i) => `<div class="row"><label for="fc-arm-${edge}">${t(`flapping.arm_${edge}`)}</label><input id="fc-arm-${edge}" name="fc_arm_${edge}" type="number" min="900" max="2100" step="1" value="${escapeHtml(armRange[i])}" required></div>`).join('')}</div>
+      </fieldset>` : ''}
+      <p class="helper">${state.connectionStatus === 'connected' ? t('flapping.saveHelp') : t('flapping.offline')}</p>
+      <div class="check"><input type="checkbox" id="flapping-debug" data-flapping-debug aria-controls="flapping-debug-info" ${checked(state.flappingDebug)}><label for="flapping-debug">${t('flapping.showDebug')}</label></div>
+      <div id="flapping-debug-info" data-flapping-status ${state.flappingDebug ? '' : 'hidden'}>${state.flappingDebug ? flappingStatusHtml() : ''}</div>
+    </div>
+    </div></details>`;
+}
+
 function validatedDrift(value, context) {
   try { return validateDrift(value, context); }
   catch (error) { throw new Error(t(`drift.error.${error.message}`)); }
@@ -4105,6 +4262,7 @@ function renderFlight() {
           ${renderOrientationCalibration(installEuler)}
           ${renderDriftSwitch()}
           ${renderDriftCard()}
+          ${renderFlappingCard()}
           <div class="actions"><button class="primary" ${state.busy || state.imuCalibration.busy || state.orientationCal.busy || !state.target || state.profileImportError ? 'disabled' : ''}>${t('action.save')}</button><button class="secondary" type="button" data-action="reboot" ${state.busy || state.imuCalibration.busy || state.orientationCal.busy ? 'disabled' : ''}>${t('action.reboot')}</button></div>
         </form>
       </section>`;
@@ -4141,6 +4299,7 @@ function renderFlight() {
         </div>
         ${renderDriftSwitch()}
         ${renderDriftCard()}
+        ${renderFlappingCard()}
         <div class="filter-config">
           <div class="filter-config-header"><div><h3>${t('flight.filterSettings')}</h3></div></div>
           <div class="filter-config-body">
@@ -5037,6 +5196,13 @@ function render() {
 
 function wireEvents() {
   syncDriftBeginnerSummary();
+  document.querySelector('[data-flapping-debug]')?.addEventListener('change', (event) => {
+    state.flappingDebug = event.target.checked;
+    const debug = document.querySelector('[data-flapping-status]');
+    debug.hidden = !state.flappingDebug;
+    debug.innerHTML = state.flappingDebug ? flappingStatusHtml() : '';
+    if (state.flappingDebug) void checkConnectionHealth();
+  });
   document.querySelector('[data-drift-detailed]')?.addEventListener('change', (event) => {
     state.driftDetailed = event.target.checked;
     syncDriftParameterMode();
