@@ -4970,6 +4970,33 @@ async function stopMspDebugConnectionIfIdle(disconnect = true) {
   }
 }
 
+let topbarResizeObserver;
+
+function mountPageActions() {
+  const actions = document.querySelector('#page-actions');
+  const form = document.querySelector('main #runtime-form, main #model-form, main #pwm-form, main #flight-form, main #hardware-form, main #wifi-form');
+  const save = form?.querySelector(':scope > .actions > button.primary')
+    || document.querySelector('main [data-action="beginner-pwm-save"]');
+  const reboot = document.querySelector('main [data-action="reboot"]');
+  for (const button of [save, reboot]) {
+    if (!button) continue;
+    const footer = button.parentElement;
+    // Native form association preserves validation and the existing submit handler.
+    if (button.type === 'submit') button.setAttribute('form', form.id);
+    if (button === save && form?.id !== 'wifi-form') button.textContent = t('action.saveCurrentPage');
+    actions.append(button);
+    if (!footer.children.length) footer.remove();
+  }
+  actions.hidden = !actions.children.length;
+
+  const topbar = document.querySelector('.topbar');
+  const updateHeight = () => document.documentElement.style.setProperty('--topbar-height', `${Math.ceil(topbar.getBoundingClientRect().height)}px`);
+  topbarResizeObserver?.disconnect();
+  topbarResizeObserver = new ResizeObserver(updateHeight);
+  topbarResizeObserver.observe(topbar);
+  updateHeight();
+}
+
 function render() {
   document.querySelector('#app').innerHTML = `
     <div class="app">
@@ -4985,11 +5012,14 @@ function render() {
           <option value="zh-CN" ${selected(getLocale(), 'zh-CN')}>${t('lang.chinese')}</option>
           <option value="en" ${selected(getLocale(), 'en')}>${t('lang.english')}</option>
         </select>
-        <form class="connection" id="connect-form">
-          <input name="api" value="${escapeHtml(apiBaseHost())}" aria-label="API base URL">
-          <button class="primary" ${state.busy ? 'disabled' : ''}>${t('action.connect')}</button>
-          <button class="secondary" type="button" data-action="refresh" ${state.busy ? 'disabled' : ''}>${t('action.refresh')}</button>
-        </form>
+        <div class="connection-tools">
+          <form class="connection" id="connect-form">
+            <input name="api" value="${escapeHtml(apiBaseHost())}" aria-label="API base URL">
+            <button class="primary" ${state.busy ? 'disabled' : ''}>${t('action.connect')}</button>
+            <button class="secondary" type="button" data-action="refresh" ${state.busy ? 'disabled' : ''}>${t('action.refresh')}</button>
+          </form>
+          <div class="page-actions" id="page-actions" hidden></div>
+        </div>
       </header>
       <div class="shell">
         <nav class="nav">${tabs.map(([id, getLabel]) => `<button type="button" data-tab="${id}" class="${state.tab === id ? 'active' : ''}">${getLabel()}</button>`).join('')}</nav>
@@ -5001,6 +5031,7 @@ function render() {
       </div>
       ${renderBeginnerGuide()}
     </div>`;
+  mountPageActions();
   wireEvents();
 }
 

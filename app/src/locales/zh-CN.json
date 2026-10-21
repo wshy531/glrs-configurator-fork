@@ -21,6 +21,7 @@
     "connect": "连接",
     "refresh": "刷新",
     "save": "保存",
+    "saveCurrentPage": "保存当前页",
     "reboot": "重启",
     "resetModel": "重置模型",
     "resetHardware": "重置硬件",

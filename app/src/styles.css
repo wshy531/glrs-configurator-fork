@@ -44,6 +44,7 @@ button:disabled {
   background: #172033;
   color: #fff;
   display: flex;
+  flex-wrap: wrap;
   gap: 18px;
   justify-content: space-between;
   padding: 14px clamp(16px, 3vw, 34px);
@@ -159,11 +160,35 @@ button:disabled {
   50% { opacity: 0.35; transform: scale(0.75); }
 }
 
+.connection-tools {
+  align-items: center;
+  display: flex;
+  flex: 1 1 460px;
+  flex-wrap: wrap;
+  gap: 8px;
+  justify-content: flex-end;
+  min-width: 0;
+}
+
+.page-actions {
+  align-items: center;
+  border-left: 1px solid #3a465b;
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+  padding-left: 8px;
+}
+
+.page-actions[hidden] { display: none; }
+.page-actions button { white-space: nowrap; }
+
 .connection {
   align-items: center;
   display: grid;
+  flex: 1 1 280px;
   gap: 8px;
-  grid-template-columns: minmax(180px, 320px) auto auto;
+  grid-template-columns: minmax(100px, 1fr) auto auto;
+  min-width: 0;
 }
 
 .connection input {
@@ -172,6 +197,7 @@ button:disabled {
   border-radius: 6px;
   color: #fff;
   height: 36px;
+  min-width: 0;
   padding: 0 10px;
 }
 
@@ -199,12 +225,12 @@ button:disabled {
   align-self: start;
   background: #fff;
   border-right: 1px solid #d8dee6;
-  max-height: calc(100vh - 64px);
-  min-height: calc(100vh - 64px);
+  max-height: calc(100vh - var(--topbar-height, 64px));
+  min-height: calc(100vh - var(--topbar-height, 64px));
   overflow-y: auto;
   padding: 14px;
   position: sticky;
-  top: 64px;
+  top: var(--topbar-height, 64px);
 }
 
 .nav button {
@@ -1155,13 +1181,23 @@ button:disabled {
 
 @media (max-width: 760px) {
   .topbar {
-    align-items: stretch;
+    align-items: center;
     display: grid;
+    gap: 8px;
+    grid-template-columns: minmax(0, 1fr) auto;
   }
 
-  .connection {
-    grid-template-columns: 1fr;
+  .topbar .brand { grid-column: 1 / -1; }
+  .topbar .connection-status { margin-left: 0; }
+  .topbar .lang-switch { justify-self: end; }
+
+  .connection-tools {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: minmax(0, 1fr);
   }
+
+  .page-actions { border-left: 0; justify-content: flex-end; padding-left: 0; }
 
   .shell {
     grid-template-columns: 1fr;

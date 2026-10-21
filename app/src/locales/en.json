@@ -21,6 +21,7 @@
     "connect": "Connect",
     "refresh": "Refresh",
     "save": "Save",
+    "saveCurrentPage": "Save current page",
     "reboot": "Reboot",
     "resetModel": "Reset Model",
     "resetHardware": "Reset Hardware",
